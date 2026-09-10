@@ -42,7 +42,9 @@ if (!process.env.DATABASE_URL) {
 }
 
 export default defineConfig({
-  schema: path.join(__dirname, "./src/schema/index.ts"),
+  // Relative glob with forward slashes. Absolute Windows paths break
+  // drizzle-kit globs (this repo folder name contains `\r`).
+  schema: "./src/schema/*.ts",
   dialect: "postgresql",
   dbCredentials: {
     url: process.env.DATABASE_URL,

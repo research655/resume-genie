@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Typechecks shared libs, the API server, and the web app.
+      # `pnpm run typecheck` (every package, including mockups) is not required;
+      # esbuild and vite still build the API and the web app below.
+      - name: Typecheck
+        run: pnpm run ci:typecheck
+
+      - name: Test
+        run: pnpm run ci:test
+
+      - name: Build
+        env:
+          PORT: "5173"
+          BASE_PATH: "/"
+        run: pnpm run ci:build

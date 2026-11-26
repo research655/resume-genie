@@ -10,6 +10,8 @@ import {
   DeleteDocumentParams,
 } from "@workspace/api-zod";
 import { stripSession } from "../lib/session";
+import { resolveDocumentFormat } from "../lib/document-format";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -30,31 +32,56 @@ router.post("/documents", async (req, res): Promise<void> => {
     return;
   }
 
-  const [doc] = await db
-    .insert(documentsTable)
-    .values({ ...parsed.data, sessionId: req.sessionId })
-    .returning();
-  res.status(201).json(stripSession(doc));
+  if (!process.env.DATABASE_URL?.trim()) {
+    res.status(500).json({ error: saveFailureMessage() });
+    return;
+  }
+
+  try {
+    const [doc] = await db
+      .insert(documentsTable)
+      .values({ ...parsed.data, sessionId: req.sessionId })
+      .returning();
+    res.status(201).json(stripSession(doc));
+  } catch (err) {
+    logger.error({ err }, "Failed to save document");
+    res.status(500).json({ error: saveFailureMessage(err) });
+  }
 });
 
-const ACCEPTED_MIMETYPES: Record<string, string> = {
-  "application/pdf": "pdf",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-  "application/msword": "doc",
-  "text/plain": "txt",
-};
-
-router.post("/documents/extract-pdf", upload.single("file"), async (req, res): Promise<void> => {
+router.post("/documents/extract-pdf", (req, res, next) => {
+  upload.single("file")(req, res, (err: unknown) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        res.status(400).json({ error: "File is too large. Maximum size is 10 MB." });
+        return;
+      }
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err) {
+      next(err);
+      return;
+    }
+    next();
+  });
+}, async (req, res): Promise<void> => {
   if (!req.file) {
     res.status(400).json({ error: "No file uploaded" });
     return;
   }
 
-  const format = ACCEPTED_MIMETYPES[req.file.mimetype];
-  if (!format) {
-    res.status(400).json({ error: "Unsupported file type. Please upload a PDF, DOCX, or TXT file." });
+  const resolved = resolveDocumentFormat(req.file.mimetype, req.file.originalname);
+  if (!resolved.format) {
+    res.status(400).json({
+      error:
+        resolved.reason === "conflict"
+          ? "This file's extension and MIME type disagree. Upload a PDF, DOCX, DOC, or TXT file whose type matches its name."
+          : "Unsupported file type. Please upload a PDF, DOCX, DOC, or TXT file.",
+    });
     return;
   }
+  const format = resolved.format;
 
   try {
     let text = "";
@@ -129,3 +156,13 @@ router.delete("/documents/:id", async (req, res): Promise<void> => {
 });
 
 export default router;
+
+function saveFailureMessage(err?: unknown): string {
+  const raw = err instanceof Error ? err.message : "";
+  const missing = !process.env.DATABASE_URL?.trim() || /DATABASE_URL must be set/i.test(raw);
+  // Never echo a connection string back to the browser.
+  if (missing && !/postgres(ql)?:\/\//i.test(raw)) {
+    return "Could not save document. DATABASE_URL is not set. Copy .env.example to .env in the repo folder, set DATABASE_URL, then restart the API.";
+  }
+  return "Could not save document. The database could not be reached. Check DATABASE_URL in .env, confirm the database is running, and run pnpm db:push if the tables are missing.";
+}
